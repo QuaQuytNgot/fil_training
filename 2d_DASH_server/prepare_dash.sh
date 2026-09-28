@@ -1,6 +1,5 @@
-```bash
 #!/usr/bin/env bash
-# Download (or accept) one video, encode an H.264 bitrate ladder,
+# Download (or accept) one video, encode a bitrate ladder,
 # and package the representations as MPEG-DASH.
 
 set -euo pipefail
@@ -9,6 +8,7 @@ INPUT_URL=""
 INPUT_FILE=""
 OUTPUT_DIR=""
 SEGMENT_DURATION=2
+VIDEO_CODEC=auto
 
 usage() {
     cat <<'EOF'
@@ -20,12 +20,13 @@ Options:
   --input-file FILE         Use an already-downloaded source video.
   --output-dir DIR          New directory for manifest.mpd and .m4s files.
   --segment-duration N      Segment duration in whole seconds (default: 2).
+  --video-codec CODEC       auto, libx264, libx265, or mpeg4 (default: auto).
   -h, --help                Show this help.
 
 The output directory must not already exist.
 
-Three H.264 video representations are produced:
-  - 426x240   @ 400 kbps
+Three video representations are produced:
+  - 480x270   @ 400 kbps
   - 640x360   @ 800 kbps
   - 1280x720  @ 2500 kbps
 EOF
@@ -39,6 +40,13 @@ fail() {
 require_command() {
     command -v "$1" >/dev/null 2>&1 ||
         fail "required command not found: $1"
+}
+
+has_video_encoder() {
+    # Read all output with awk. Do not use grep -q with pipefail here: grep
+    # can close its input early and make ffmpeg look as if it failed.
+    ffmpeg -hide_banner -encoders 2>/dev/null |
+        awk -v encoder="$1" '$2 == encoder { found = 1 } END { exit !found }'
 }
 
 # ---------------------------------------------------------------------------
@@ -67,6 +75,11 @@ while [[ $# -gt 0 ]]; do
             SEGMENT_DURATION=$2
             shift 2
             ;;
+        --video-codec)
+            [[ $# -ge 2 ]] || fail "--video-codec requires a value"
+            VIDEO_CODEC=$2
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -93,6 +106,11 @@ done
 [[ "$SEGMENT_DURATION" =~ ^[1-9][0-9]*$ ]] ||
     fail "--segment-duration must be a positive whole number"
 
+case "$VIDEO_CODEC" in
+    auto|libx264|libx265|mpeg4) ;;
+    *) fail "--video-codec must be auto, libx264, libx265, or mpeg4" ;;
+esac
+
 [[ ! -e "$OUTPUT_DIR" ]] ||
     fail "output directory already exists: $OUTPUT_DIR"
 
@@ -109,24 +127,25 @@ if [[ -n "$INPUT_URL" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Check H.264 encoder
-#
-# Do NOT use:
-#
-#   ffmpeg ... | grep -q ...
-#
-# together with `set -o pipefail`.
-#
-# grep -q may exit as soon as it finds libx264, causing ffmpeg to receive
-# SIGPIPE. With pipefail enabled, that can make a successful check appear
-# to have failed.
+# Select a portable software encoder. libx264 produces the most broadly
+# compatible output, but it is not bundled in every FFmpeg package. mpeg4 is
+# part of standard FFmpeg builds and keeps the training pipeline usable when
+# optional x264/x265 libraries are absent.
 # ---------------------------------------------------------------------------
 
-if ! ffmpeg -hide_banner -encoders 2>/dev/null |
-    grep -E '^[[:space:]]*V[^[:space:]]*[[:space:]]+libx264([[:space:]]|$)' \
-        >/dev/null; then
-    fail "ffmpeg was built without the libx264 encoder"
+if [[ "$VIDEO_CODEC" == auto ]]; then
+    if has_video_encoder libx264; then
+        VIDEO_CODEC=libx264
+    elif has_video_encoder mpeg4; then
+        VIDEO_CODEC=mpeg4
+    else
+        fail "ffmpeg has neither libx264 nor the built-in mpeg4 video encoder"
+    fi
+elif ! has_video_encoder "$VIDEO_CODEC"; then
+    fail "ffmpeg was built without the requested video encoder: $VIDEO_CODEC"
 fi
+
+printf 'Using video encoder: %s\n' "$VIDEO_CODEC"
 
 # ---------------------------------------------------------------------------
 # Create temporary staging directory
@@ -255,12 +274,23 @@ fi
 #
 # Input video is mapped three times:
 #
-#   v:0 -> 426x240
+#   v:0 -> 480x270
 #   v:1 -> 640x360
 #   v:2 -> 1280x720
 #
-# Each representation uses libx264.
+# Each representation uses the selected software encoder.
 # ---------------------------------------------------------------------------
+
+video_codec_args=(
+    -c:v "$VIDEO_CODEC"
+    -pix_fmt yuv420p
+)
+
+# preset is an x264/x265 private option. Passing it to the built-in mpeg4
+# encoder makes FFmpeg fail with "Option preset not found".
+if [[ "$VIDEO_CODEC" == libx264 || "$VIDEO_CODEC" == libx265 ]]; then
+    video_codec_args+=( -preset medium )
+fi
 
 ffmpeg_args=(
     -hide_banner
@@ -273,17 +303,15 @@ ffmpeg_args=(
     -map 0:v:0
 
     -filter:v:0
-    'scale=w=426:h=240:force_original_aspect_ratio=decrease,pad=426:240:(ow-iw)/2:(oh-ih)/2'
+    'scale=w=480:h=270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2,setsar=1'
 
     -filter:v:1
-    'scale=w=640:h=360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2'
+    'scale=w=640:h=360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,setsar=1'
 
     -filter:v:2
-    'scale=w=1280:h=720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2'
+    'scale=w=1280:h=720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1'
 
-    -c:v libx264
-    -pix_fmt yuv420p
-    -preset medium
+    "${video_codec_args[@]}"
 
     -b:v:0 400k
     -maxrate:v:0 428k
@@ -380,4 +408,3 @@ if [[ -n "$download_file" ]]; then
 fi
 
 printf '\nCreated DASH output: %s/manifest.mpd\n' "$OUTPUT_DIR"
-```

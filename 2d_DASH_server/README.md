@@ -36,8 +36,10 @@ On Ubuntu/Debian, install the usual tools with:
 sudo apt install curl ffmpeg nghttp2-server openssl
 ```
 
-`ffmpeg` must include the `libx264` encoder and AAC support.  `nghttp2-server`
-provides the `nghttpd` HTTP/2 server used below.
+The script chooses `libx264` when FFmpeg provides it; otherwise it falls back
+to FFmpeg's built-in `mpeg4` encoder. This fallback keeps the lab portable,
+but H.264 is normally the more compatible choice for real DASH players.
+`nghttp2-server` provides the `nghttpd` HTTP/2 server used below.
 
 ---
 
@@ -60,7 +62,11 @@ bash prepare_dash.sh \
   --segment-duration 2
 ```
 
-The script creates 240p, 360p, and 720p H.264 representations.  It uses a
+Use `--video-codec libx264`, `--video-codec libx265`, or
+`--video-codec mpeg4` to force an encoder. `--video-codec auto` is the
+default and selects `libx264` first, then `mpeg4` when x264 is unavailable.
+
+The script creates 270p, 360p, and 720p representations. It uses a
 static `SegmentTemplate` MPD and `$Number%05d$` media-segment naming, so the
 first client exercise does not need `SegmentTimeline` or `$Time$` parsing.
 
